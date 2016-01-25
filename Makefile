@@ -9,6 +9,7 @@ PROJECT=client
 all: ${PROJECT}
 
 client: client.o
+	cc client.o ${LDFLAGS} -o client
 
 client.o: Makefile
 

@@ -22,6 +22,7 @@
 #include <string.h>
 #include <assert.h>
 #include <err.h>
+#include <sys/types.h>
 
 #include "mosquitto.h"
 
@@ -44,7 +45,11 @@
 
 /* Hostname and port for the MQTT broker. */
 #define BROKER_HOSTNAME "localhost"
-#define BROKER_PORT 1883
+#define BROKER_PORT	1883
+#define PUBLISH_TOPIC	"test_topic"
+#define PUBLISH_MSG_QOS 0
+static bool connected = true;
+static int mid_sent = 0;
 
 struct client_info {
     struct mosquitto *m;
@@ -71,6 +76,8 @@ int main(int argc, char **argv) {
 
     if (!set_callbacks(m)) { die("set_callbacks() failure\n"); }
 
+    /* client_opts_set: set up the configuration */
+
     if (!connect(m)) { die("connect() failure\n"); }
 
     return run_loop(&info);
@@ -90,6 +97,9 @@ static struct mosquitto *init(struct client_info *info) {
     if (buf_sz < snprintf(buf, buf_sz, "client_%d", info->pid)) {
         return NULL;            /* snprintf buffer failure */
     }
+
+    mosquitto_lib_init();
+
     /* Create a new mosquitto client, with the name "client_#{PID}". */
     struct mosquitto *m = mosquitto_new(buf, true, udata);
 
@@ -98,17 +108,9 @@ static struct mosquitto *init(struct client_info *info) {
 
 /* Callback for successful connection: add subscriptions. */
 static void on_connect(struct mosquitto *m, void *udata, int res) {
+    int rc = MOSQ_ERR_SUCCESS;
     if (res == 0) {             /* success */
-        struct client_info *info = (struct client_info *)udata;
-        mosquitto_subscribe(m, NULL, "tick", 0);
-        mosquitto_subscribe(m, NULL, "control/all", 0);
-        size_t sz = 32;
-        char control_pid[sz];
-        if (sz < snprintf(control_pid, sz, "control/%d", info->pid)) {
-            die("snprintf\n");
-        }
-        mosquitto_subscribe(m, NULL, control_pid, 0);
-        mosquitto_subscribe(m, NULL, "tick", 0);
+	LOG("-- connect successfully\n");
     } else {
         die("connection refused\n");
     }
@@ -133,30 +135,9 @@ static void on_message(struct mosquitto *m, void *udata,
 
     struct client_info *info = (struct client_info *)udata;
 
+#if 0
     if (match(msg->topic, "tick")) {
         if (0 == strncmp(msg->payload, "tick", msg->payloadlen)) {
-            LOG("tock %d\n", info->pid);
-            size_t sz = 32;
-            char tock_pid[sz];
-            info->tick_ct++;
-            if (sz < snprintf(tock_pid, sz, "tock/%d", info->pid)) {
-                die("snprintf\n");
-            }
-
-            size_t payload_sz = 32;
-            char payload[payload_sz];
-            size_t payloadlen = 0;
-            payloadlen = snprintf(payload, payload_sz, "tock %d %d",
-                info->pid, info->tick_ct);
-            if (payload_sz < payloadlen) {
-                die("snprintf\n");
-            }
-
-            int res = mosquitto_publish(m, NULL, tock_pid,
-                payloadlen, payload, 0, false);
-            if (res != MOSQ_ERR_SUCCESS) {
-                die("publish\n");
-            }
         } else {
             LOG("invalid 'tick' message\n");
         }
@@ -169,6 +150,7 @@ static void on_message(struct mosquitto *m, void *udata,
             (void)mosquitto_disconnect(m);
         }
     }
+#endif
 }
 
 /* Successful subscription hook. */
@@ -177,12 +159,19 @@ static void on_subscribe(struct mosquitto *m, void *udata, int mid,
     LOG("-- subscribed successfully\n");
 }
 
+static void on_disconnect(struct mosquitto *m, void *udata, int res)
+{
+    LOG("-- disconnected callback\n");
+    connected = false;
+}
+
 /* Register the callbacks that the mosquitto connection will use. */
 static bool set_callbacks(struct mosquitto *m) {
     mosquitto_connect_callback_set(m, on_connect);
     mosquitto_publish_callback_set(m, on_publish);
     mosquitto_subscribe_callback_set(m, on_subscribe);
     mosquitto_message_callback_set(m, on_message);
+    mosquitto_disconnect_callback_set(m, on_disconnect);
     return true;
 }
 
@@ -194,8 +183,21 @@ static bool connect(struct mosquitto *m) {
 
 /* Loop until it is explicitly halted or the network is lost, then clean up. */
 static int run_loop(struct client_info *info) {
-    int res = mosquitto_loop_forever(info->m, 1000, 1000 /* unused */);
-    
+    int res = MOSQ_ERR_SUCCESS;
+    int i = 0;
+    char buf[1024];
+
+    memset(buf, 0, sizeof(buf));
+    do {
+	res = mosquitto_loop(info->m, -1, 1 /* unused */);
+	if (res != MOSQ_ERR_SUCCESS) break;
+	sleep(5);
+	memset(buf, 0, sizeof(buf));
+	sprintf(buf, "test_msg#%d\n", i++);
+	res = mosquitto_publish(info->m, &mid_sent, PUBLISH_TOPIC,
+		      strlen(buf), buf, PUBLISH_MSG_QOS, 0);
+    }while(res == MOSQ_ERR_SUCCESS && connected);
+
     mosquitto_destroy(info->m);
     (void)mosquitto_lib_cleanup();
 
